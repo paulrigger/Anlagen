@@ -1,11 +1,11 @@
 // Dünner Wrapper um die Sheets API v4 (REST, kein gapi nötig).
 import { CONFIG } from './config.js';
-import { getToken, clearToken } from './auth.js';
+import { getToken, clearToken, AuthError } from './auth.js';
 
 const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.SPREADSHEET_ID}`;
 
-async function call(path, { method = 'GET', body } = {}, retry = true) {
-  const token = await getToken();
+async function call(path, { method = 'GET', body } = {}) {
+  const token = getToken(); // wirft AuthError, wenn abgelaufen
   const res = await fetch(BASE + path, {
     method,
     headers: {
@@ -14,9 +14,12 @@ async function call(path, { method = 'GET', body } = {}, retry = true) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401 && retry) {
+  if (res.status === 401) {
     clearToken();
-    return call(path, { method, body }, false);
+    throw new AuthError('Anmeldung abgelaufen');
+  }
+  if (res.status === 403) {
+    throw new AuthError('Kein Zugriff auf das Sheet – mit dem richtigen Google-Konto anmelden');
   }
   if (!res.ok) {
     let msg = `${res.status}`;

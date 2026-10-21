@@ -10,7 +10,8 @@ Persönliche Portfolio-App. Statisches Frontend auf GitHub Pages, Daten im Googl
 index.html            App-Shell
 css/app.css           Styles (hell/dunkel automatisch)
 js/config.js          Client-ID, Sheet-ID, Proxy-URL, Snapshot-Spalten
-js/auth.js            Google Identity Services (OAuth Token-Client)
+js/auth.js            Google OAuth (Redirect-Flow, funktioniert auch als Homescreen-App)
+sw.js                 Service Worker (installierbar, cacht nur App-Dateien, nie Daten)
 js/sheets.js          Sheets API v4 (lesen, anhängen)
 js/model.js           Rechenlogik (rein, in Node testbar)
 js/history.js         Kurshistorie (CoinGecko / Proxy)
@@ -37,8 +38,10 @@ URL danach: `https://paulrigger.github.io/anlagen/`
      → Nur Test-User können sich überhaupt anmelden. Beim ersten Login erscheint „Google hat diese App nicht überprüft“ → *Weiter*.
 4. **Credentials → Create credentials → OAuth client ID** → Typ **Web application**:
    - *Authorized JavaScript origins*: `https://paulrigger.github.io` (ohne Pfad, ohne `/` am Ende)
-   - Für lokalen Test zusätzlich `http://localhost:8000`
-   - *Redirect URIs*: leer lassen (Token-Client braucht keine).
+   - *Authorized redirect URIs*: `https://paulrigger.github.io/anlagen/` (**mit** `/` am Ende, exakt so)
+   - Für lokalen Test zusätzlich Origin `http://localhost:8000` und Redirect `http://localhost:8000/`
+
+   Der Login läuft als Redirect (kein Popup), damit er auch in der installierten App am iPhone funktioniert.
 5. Client-ID (`….apps.googleusercontent.com`) in `js/config.js` bei `CLIENT_ID` eintragen, committen.
 
 Die Client-ID ist kein Geheimnis. Ohne Origin-Freigabe und ohne Test-User-Eintrag kann niemand anders damit etwas anfangen, und Datenzugriff hat ohnehin nur dein Google-Konto.
@@ -54,7 +57,21 @@ Die Client-ID ist kein Geheimnis. Ohne Origin-Freigabe und ohne Test-User-Eintra
 6. **Bereitstellen → Neue Bereitstellung → Web-App**: *Ausführen als: Ich*, *Zugriff: Jeder* → URL (endet auf `/exec`) in `js/config.js` bei `KURS_PROXY_URL` eintragen.
    Der Proxy gibt nur öffentliche Marktkurse zurück, keine Portfolio-Daten. Gegen Fremdnutzung optional denselben Wert in `PROXY_KEY` (Code.gs) und `KURS_PROXY_KEY` (config.js) setzen.
 
-### 4. Altes Sheet „Sparen“
+### 4. Als App installieren
+
+Dieselbe URL `https://paulrigger.github.io/anlagen/` überall:
+
+| Gerät | Schritte |
+|---|---|
+| iPhone / iPad | **Safari** öffnen → Teilen-Symbol → *Zum Home-Bildschirm* (nur Safari kann das) |
+| Android | Chrome → Menü ⋮ → *App installieren* bzw. *Zum Startbildschirm hinzufügen* |
+| Mac / Windows | Chrome oder Edge → Installieren-Symbol rechts in der Adressleiste; Safari (Mac) → Ablage → *Zum Dock hinzufügen* |
+
+Danach startet die App im eigenen Fenster ohne Browser-Leisten. Erster Start: einmal bei Google anmelden. Danach meldet sich die App automatisch wieder an, solange du bei Google angemeldet bist (Token ~1 h, dann kurzer Redirect).
+
+Updates: Neue Commits sind beim nächsten Öffnen mit Netz sofort aktiv (Service Worker lädt immer zuerst vom Netz). Offline startet die Oberfläche, Daten gibt es aber nur online. Portfolio-Daten werden nie auf dem Gerät gecacht.
+
+### 5. Altes Sheet „Sparen“
 
 Läuft unverändert weiter. Wenn die App ein paar Tage plausible Snapshots schreibt, die Trigger im alten Sheet deaktivieren (Apps Script → Trigger), damit nicht zwei Systeme Snapshots erzeugen.
 

@@ -1,83 +1,104 @@
-// Google Identity Services – Token-Client (kein Backend, kein Refresh-Token).
-// Access-Token lebt ~1 h im sessionStorage (nur dieser Tab), danach stiller Re-Login.
+// Google OAuth 2.0 – Redirect-Flow (response_type=token), ohne Popup.
+// Grund: Popups funktionieren in einer vom Homescreen gestarteten App (iOS-Standalone)
+// nicht zuverlässig. Der Redirect läuft im selben Fenster und kommt mit dem Token
+// im URL-Fragment zurück. Kein Backend, kein Refresh-Token: Token gilt ~1 h,
+// danach erneuter Redirect (bei bestehender Google-Sitzung ohne Eingabe).
 import { CONFIG } from './config.js';
 
 const KEY = 'anlagen.token';
-let tokenClient = null;
-let pending = null;
+const STATE_KEY = 'anlagen.oauth_state';
+const SEEN_KEY = 'anlagen.loggedInBefore';
+
+export class AuthError extends Error {}
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+  del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
+};
 
 function load() {
   try {
-    const t = JSON.parse(sessionStorage.getItem(KEY) || 'null');
+    const t = JSON.parse(store.get(KEY) || 'null');
     if (t && t.expires > Date.now() + 60_000) return t;
   } catch { /* ignore */ }
   return null;
 }
 
-function save(t) {
-  try { sessionStorage.setItem(KEY, JSON.stringify(t)); } catch { /* ignore */ }
-}
-
-export function clearToken() {
-  try { sessionStorage.removeItem(KEY); } catch { /* ignore */ }
-}
-
-function waitForGis() {
-  return new Promise((resolve, reject) => {
-    const t0 = Date.now();
-    (function poll() {
-      if (window.google?.accounts?.oauth2) return resolve();
-      if (Date.now() - t0 > 10_000) return reject(new Error('Google Identity Services nicht geladen'));
-      setTimeout(poll, 100);
-    })();
-  });
-}
-
-async function init() {
-  if (tokenClient) return;
-  await waitForGis();
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CONFIG.CLIENT_ID,
-    scope: CONFIG.SCOPES,
-    callback: () => {}, // wird pro Anfrage überschrieben
-  });
+// Muss exakt als „Authorized redirect URI“ im OAuth-Client eingetragen sein.
+export function redirectUri() {
+  return location.origin + location.pathname.replace(/index\.html$/, '');
 }
 
 export function hasValidToken() {
   return !!load();
 }
 
-// interactive=false → versucht stillen Login (kein Consent-Dialog, falls schon erteilt)
-export async function getToken({ interactive = false } = {}) {
-  const cached = load();
-  if (cached) return cached.access_token;
-  if (pending) return pending;
-  await init();
-  pending = new Promise((resolve, reject) => {
-    tokenClient.callback = (resp) => {
-      pending = null;
-      if (resp.error) return reject(new Error(resp.error_description || resp.error));
-      if (!google.accounts.oauth2.hasGrantedAllScopes(resp, CONFIG.SCOPES)) {
-        return reject(new Error('Sheets-Berechtigung wurde nicht erteilt'));
-      }
-      const t = { access_token: resp.access_token, expires: Date.now() + resp.expires_in * 1000 };
-      save(t);
-      resolve(t.access_token);
-    };
-    tokenClient.error_callback = (err) => {
-      pending = null;
-      reject(new Error(err?.message || err?.type || 'Login abgebrochen'));
-    };
-    // prompt '' → Consent nur beim ersten Mal. Das Popup muss aus einem Klick kommen,
-    // sonst blockt der Browser es; interactive=false nur nutzen, wenn ein Token
-    // gerade abgelaufen ist und die Seite bereits offen war.
-    tokenClient.requestAccessToken({ prompt: '' });
-  });
-  return pending;
+export function wasLoggedInBefore() {
+  return store.get(SEEN_KEY) === '1';
+}
+
+export function clearToken() {
+  store.del(KEY);
+}
+
+/** Liefert gültiges Token oder wirft AuthError (dann login() aufrufen). */
+export function getToken() {
+  const t = load();
+  if (!t) throw new AuthError('Anmeldung abgelaufen');
+  return t.access_token;
+}
+
+/** Leitet zu Google weiter. returnHash = View, zu der danach zurückgesprungen wird. */
+export function login(returnHash = location.hash) {
+  const nonce = crypto.getRandomValues(new Uint32Array(4)).join('-');
+  store.set(STATE_KEY, nonce);
+  const u = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  u.search = new URLSearchParams({
+    client_id: CONFIG.CLIENT_ID,
+    redirect_uri: redirectUri(),
+    response_type: 'token',
+    scope: CONFIG.SCOPES,
+    include_granted_scopes: 'true',
+    state: `${nonce}|${returnHash || '#uebersicht'}`,
+  }).toString();
+  location.assign(u.toString());
+}
+
+/**
+ * Beim Start aufrufen. Wertet die Rückkehr von Google aus (Token oder Fehler im Fragment),
+ * räumt die URL auf. Rückgabe: null (kein Redirect) | { ok: true } | { error }.
+ */
+export function handleRedirect() {
+  const h = location.hash.slice(1);
+  if (!/(^|&)(access_token|error)=/.test(h)) return null;
+  const p = new URLSearchParams(h);
+  const [nonce, returnHash = '#uebersicht'] = String(p.get('state') || '').split('|');
+  const expected = store.get(STATE_KEY);
+  store.del(STATE_KEY);
+  history.replaceState(null, '', location.pathname + location.search + returnHash);
+
+  if (p.get('error')) return { error: p.get('error') === 'access_denied' ? 'Anmeldung abgebrochen' : p.get('error') };
+  if (!expected || nonce !== expected) return { error: 'Ungültige Anmeldeantwort (state). Bitte erneut anmelden.' };
+  const scopes = String(p.get('scope') || '').split(' ');
+  if (!CONFIG.SCOPES.split(' ').every((s) => scopes.includes(s))) {
+    return { error: 'Sheets-Berechtigung wurde nicht erteilt – beim Login das Häkchen setzen.' };
+  }
+  store.set(KEY, JSON.stringify({
+    access_token: p.get('access_token'),
+    expires: Date.now() + Number(p.get('expires_in') || 3600) * 1000,
+  }));
+  store.set(SEEN_KEY, '1');
+  return { ok: true };
 }
 
 export function signOut() {
   const t = load();
   clearToken();
-  if (t && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(t.access_token, () => {});
+  store.del(SEEN_KEY);
+  if (t) {
+    fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(t.access_token), {
+      method: 'POST', mode: 'no-cors', keepalive: true,
+    }).catch(() => {});
+  }
 }

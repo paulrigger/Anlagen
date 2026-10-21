@@ -1,5 +1,5 @@
 import { CONFIG, SNAPSHOT_MAP } from './config.js';
-import { getToken, hasValidToken, signOut } from './auth.js';
+import { login, handleRedirect, hasValidToken, wasLoggedInBefore, signOut, AuthError } from './auth.js';
 import { readTables, appendRows } from './sheets.js';
 import { berechne, snapshotZeile, sparplanUebersicht, naechsteTxId } from './model.js';
 import { kursHistorie } from './history.js';
@@ -16,29 +16,37 @@ const charts = {};
 /* ───────────── Start / Login ───────────── */
 
 async function start() {
-  $('#btn-login').addEventListener('click', login);
+  $('#btn-login').addEventListener('click', () => login());
   $('#btn-reload').addEventListener('click', () => laden());
-  $('#btn-logout').addEventListener('click', () => { signOut(); location.reload(); });
+  $('#btn-logout').addEventListener('click', () => { signOut(); location.replace(location.pathname); });
   window.addEventListener('hashchange', zeigeView);
+  // Handy: App aus dem Hintergrund geholt → nach >5 min Daten auffrischen
+  let versteckt = 0;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) versteckt = Date.now();
+    else if (db && versteckt && Date.now() - versteckt > 5 * 60_000) laden();
+  });
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   if (CONFIG.CLIENT_ID.startsWith('HIER_')) {
-    $('#login').hidden = false;
+    zeigeLogin('CLIENT_ID in js/config.js fehlt (siehe README).');
     $('#btn-login').disabled = true;
-    $('#login-err').textContent = 'CLIENT_ID in js/config.js fehlt (siehe README).';
     return;
   }
+  const r = handleRedirect();
+  if (r?.error) return zeigeLogin(r.error);
   if (hasValidToken()) return laden();
-  $('#login').hidden = false;
+  // Schon einmal angemeldet → direkt weiter zu Google (bei aktiver Google-Sitzung ohne Eingabe)
+  if (wasLoggedInBefore()) return login();
+  zeigeLogin();
 }
 
-async function login() {
-  $('#login-err').textContent = '';
-  try {
-    await getToken({ interactive: true });
-    await laden();
-  } catch (e) {
-    $('#login-err').textContent = e.message;
-  }
+function zeigeLogin(msg = '') {
+  $('#content').hidden = true;
+  $('#tabs').hidden = true;
+  $('#btn-reload').hidden = true;
+  $('#login').hidden = false;
+  $('#login-err').textContent = msg;
 }
 
 async function laden() {
@@ -59,11 +67,8 @@ async function laden() {
     renderErfassen();
     zeigeView();
   } catch (e) {
-    fehler(e.message);
-    if (/401|403|Login|Berechtigung/.test(e.message)) {
-      $('#content').hidden = true;
-      $('#login').hidden = false;
-    }
+    if (e instanceof AuthError) return zeigeLogin(e.message);
+    fehler(navigator.onLine === false ? 'Offline – Daten können nicht geladen werden.' : e.message);
   }
 }
 
@@ -374,7 +379,12 @@ const dez = (s) => {
 async function sperre(form, fn) {
   const btn = form.querySelector('button[type=submit]') || form;
   btn.disabled = true;
-  try { await fn(); } catch (e) { toast('Fehler: ' + e.message); } finally { btn.disabled = false; }
+  try {
+    await fn();
+  } catch (e) {
+    if (e instanceof AuthError) { toast('Anmeldung abgelaufen – nichts gespeichert. Bitte neu anmelden.'); zeigeLogin(e.message); }
+    else toast('Fehler: ' + e.message);
+  } finally { btn.disabled = false; }
 }
 
 function speichereTx(e) {
@@ -420,7 +430,8 @@ async function schreibeSnapshot(e) {
     toast('Snapshot geschrieben');
     await laden();
   } catch (err) {
-    toast('Fehler: ' + err.message);
+    if (err instanceof AuthError) zeigeLogin(err.message);
+    else toast('Fehler: ' + err.message);
   } finally {
     btn.disabled = false;
   }

@@ -42,8 +42,8 @@ tabs = {
 }
 batch = {'valueRanges': [{'values': tabs[t]} for t in ['Assets','Kurse','Transaktionen','Sparplaene','Konten','Salden','Snapshots']]}
 
-GIS = """window.google={accounts:{oauth2:{initTokenClient:(c)=>({callback:c.callback,requestAccessToken(){setTimeout(()=>this.callback({access_token:'x',expires_in:3600}),10)}}),
- hasGrantedAllScopes:()=>true,revoke:()=>{}}}};"""
+SCOPE = 'https://www.googleapis.com/auth/spreadsheets'
+TOKEN_INIT = "localStorage.setItem('anlagen.token', JSON.stringify({access_token:'x', expires: Date.now()+3600e3}));"
 
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(ROOT))
 http.server.SimpleHTTPRequestHandler.log_message = lambda *a: None
@@ -53,17 +53,57 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 errors = []
 with sync_playwright() as p:
     b = p.chromium.launch()
-    for name, vp, scheme in [('desktop', {'width': 1100, 'height': 900}, 'light'), ('mobile', {'width': 390, 'height': 844}, 'dark')]:
-        pg = b.new_page(viewport=vp, color_scheme=scheme)
+
+    def mocks(pg):
         pg.on('pageerror', lambda e: errors.append(str(e)))
         pg.on('console', lambda m: m.type == 'error' and errors.append(m.text))
-        pg.route('**/gsi/client', lambda r: r.fulfill(body=GIS, content_type='text/javascript'))
         pg.route('**/js/config.js', lambda r: r.fulfill(body=(ROOT/'js/config.js').read_text().replace('HIER_CLIENT_ID', 'test'), content_type='text/javascript'))
         pg.route('https://sheets.googleapis.com/**', lambda r: r.fulfill(json=batch))
-        pg.route('https://api.coingecko.com/**', lambda r: r.fulfill(json={'prices': [[1729000000000 + i*86400000, 60000 + i*40 + (i%7)*300] for i in range(365)]}))
         if CHART: pg.route('https://cdnjs.cloudflare.com/**', lambda r: r.fulfill(path=CHART, content_type='text/javascript'))
+
+    # 1) Login-Redirect: Klick führt zu Google mit korrekten Parametern
+    ctx = b.new_context(service_workers='block'); pg = ctx.new_page(); mocks(pg)
+    seen = {}
+    pg.route('https://accounts.google.com/**', lambda r: (seen.update(url=r.request.url), r.fulfill(body='google')))
+    pg.goto('http://127.0.0.1:8765/#positionen'); pg.click('#btn-login'); pg.wait_for_timeout(300)
+    from urllib.parse import urlparse, parse_qs
+    q = parse_qs(urlparse(seen['url']).query)
+    assert q['response_type'] == ['token'] and q['redirect_uri'] == ['http://127.0.0.1:8765/'], q
+    assert q['state'][0].endswith('|#positionen'), q['state']
+    state = q['state'][0]
+    nonce = pg.evaluate("localStorage.getItem('anlagen.oauth_state')")
+    print('1 Login-URL ok')
+
+    # 2) Rückkehr mit Token → Daten geladen, URL aufgeräumt, richtige View
+    pg.goto(f'http://127.0.0.1:8765/#access_token=abc&expires_in=3599&token_type=Bearer&scope={SCOPE}&state={state}')
+    pg.wait_for_selector('#view-positionen table')
+    assert pg.url.endswith('/#positionen'), pg.url
+    assert 'abc' in pg.evaluate("localStorage.getItem('anlagen.token')")
+    print('2 Rückkehr ok →', pg.url)
+
+    # 3) Manipulierter state → kein Token, Fehlermeldung
+    pg.evaluate("localStorage.clear(); localStorage.setItem('anlagen.oauth_state','echt')"); pg.goto('about:blank')
+    pg.goto(f'http://127.0.0.1:8765/#access_token=evil&expires_in=3599&scope={SCOPE}&state=falsch|%23uebersicht')
+    pg.wait_for_timeout(300)
+    assert pg.evaluate("localStorage.getItem('anlagen.token')") is None
+    assert 'state' in pg.text_content('#login-err'), pg.text_content('#login-err')
+    print('3 state-Prüfung ok')
+
+    # 4) Service Worker registriert sich, Manifest-Icons erreichbar
+    ctx2 = b.new_context(); pg2 = ctx2.new_page(); mocks(pg2)
+    pg2.goto('http://127.0.0.1:8765/')
+    ok = pg2.evaluate("navigator.serviceWorker.ready.then(r => !!r.active)")
+    man = pg2.evaluate("fetch('manifest.webmanifest').then(r=>r.json())")
+    for ic in man['icons']: assert pg2.request.get('http://127.0.0.1:8765/' + ic['src']).ok, ic
+    print('4 Service Worker aktiv:', ok, '| Icons:', len(man['icons']))
+    ctx.close(); ctx2.close()
+
+    for name, vp, scheme in [('desktop', {'width': 1100, 'height': 900}, 'light'), ('mobile', {'width': 390, 'height': 844}, 'dark')]:
+        c = b.new_context(viewport=vp, color_scheme=scheme, service_workers='block')
+        c.add_init_script(TOKEN_INIT)
+        pg = c.new_page(); mocks(pg)
+        pg.route('https://api.coingecko.com/**', lambda r: r.fulfill(json={'prices': [[1729000000000 + i*86400000, 60000 + i*40 + (i%7)*300] for i in range(365)]}))
         pg.goto('http://127.0.0.1:8765/')
-        pg.click('#btn-login')
         pg.wait_for_selector('.hero .big')
         pg.screenshot(path=str(OUT/f'{name}-uebersicht.png'), full_page=True)
         pg.goto('http://127.0.0.1:8765/#positionen'); pg.wait_for_selector('#view-positionen table')

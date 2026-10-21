@@ -1,6 +1,6 @@
 // Service Worker: macht die App installierbar und startet die Oberfläche schnell.
 // Portfolio-Daten (Sheets API), Kurse und Login werden NIE gecacht.
-const CACHE = 'anlagen-v2';
+const CACHE = 'anlagen-v3';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
   'js/app.js', 'js/auth.js', 'js/config.js', 'js/format.js', 'js/history.js', 'js/model.js', 'js/sheets.js',

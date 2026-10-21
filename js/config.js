@@ -3,7 +3,7 @@
 // das das Sheet lesen darf.
 export const CONFIG = {
   // Google Cloud Console → APIs & Services → Credentials → OAuth client (Web)
-  CLIENT_ID: 'HIER_CLIENT_ID.apps.googleusercontent.com',
+  CLIENT_ID: '677326864390-i30ial57k4jru0bipnic9miofc9ms2qe.apps.googleusercontent.com',
 
   // Sheet „Anlagen-DB“
   SPREADSHEET_ID: '1h7pLCOrXicLj4Mxtwo1qDp2FmUGzAAKrTmU6MyFOnq8',

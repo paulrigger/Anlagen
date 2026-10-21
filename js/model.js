@@ -153,6 +153,73 @@ export function snapshotZeile(ergebnis, header, map, datumIso, quelle = 'App') {
   });
 }
 
+/**
+ * Rekonstruierter Vermögensverlauf: Bestand zum Zeitpunkt t × Kurs zum Zeitpunkt t + Cash.
+ * - Bestand aus Transaktionen; „Basis“ gilt als seit jeher gehalten.
+ * - Kurs: letzter bekannter Kurs ≤ t aus `serien` (sonst erster verfügbarer);
+ *   Instrumente ohne Serie bleiben auf dem aktuellen Kurs (konstant).
+ * - Cash: letzter Saldo ≤ t (sonst frühester).
+ * grid: aufsteigende Zeitpunkte in ms. Liefert [{ t, v, risiko: {Sicher, …} }].
+ */
+export function portfolioKurve({ assets, transaktionen, salden, konten, kurseJetzt, serien, grid }) {
+  const ms = (serial) => (serial - 25569) * 86400000;
+  const aktiv = assets.filter((a) => isTrue(a.aktiv));
+
+  const txBy = {};
+  for (const t of transaktionen) (txBy[t.asset_id] ??= []).push(t);
+  const menge = (id, t) => (txBy[id] || []).reduce((s, x) => {
+    if (x.typ !== 'Basis' && ms(x.datum) > t) return s;
+    const m = num(x.menge) ?? 0;
+    return ZUGANG.has(x.typ) ? s + m : ABGANG.has(x.typ) ? s - m : s;
+  }, 0);
+
+  // Schrittfunktion je Serie; grid ist aufsteigend → Zeiger läuft nur vorwärts
+  const stepper = (pts, wert) => {
+    const s = [...pts].sort((a, b) => a.t - b.t);
+    let i = 0;
+    return (t) => {
+      while (i + 1 < s.length && s[i + 1].t <= t) i++;
+      return wert(s[i].t <= t ? s[i] : s[0]);
+    };
+  };
+
+  const preis = {};
+  for (const [inst, jetzt] of Object.entries(kurseJetzt)) {
+    const s = (serien[inst] || []).filter((p) => Number.isFinite(p.p));
+    preis[inst] = s.length ? stepper(s, (p) => p.p) : () => jetzt ?? 0;
+  }
+
+  const saldoBy = {};
+  for (const s of salden) (saldoBy[s.konto_id] ??= []).push({ t: ms(s.datum), v: num(s.saldo_eur) ?? 0 });
+  const saldo = Object.fromEntries(Object.entries(saldoBy).map(([k, pts]) => [k, stepper(pts, (p) => p.v)]));
+  const kontoRisiko = Object.fromEntries(konten.map((k) => [k.konto_id, k.risiko || 'Sicher']));
+
+  return grid.map((t) => {
+    const risiko = {};
+    let v = 0;
+    for (const a of aktiv) {
+      const w = menge(a.asset_id, t) * (preis[a.instrument]?.(t) ?? 0);
+      v += w;
+      risiko[a.risiko] = (risiko[a.risiko] ?? 0) + w;
+    }
+    for (const [k, f] of Object.entries(saldo)) {
+      const w = f(t);
+      v += w;
+      const r = kontoRisiko[k] || 'Sicher';
+      risiko[r] = (risiko[r] ?? 0) + w;
+    }
+    return { t, v, risiko };
+  });
+}
+
+/** Zeitraster von `from` bis `to` (ms) in Schritten von `step` ms, Endpunkt inklusive. */
+export function zeitraster(from, to, step) {
+  const out = [];
+  for (let t = from; t < to; t += step) out.push(t);
+  out.push(to);
+  return out;
+}
+
 /** Sparplan-Monatsrate (aktiv vs. geplant). */
 export function sparplanUebersicht(sparplaene) {
   let aktiv = 0;

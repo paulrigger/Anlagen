@@ -1,8 +1,8 @@
 import { CONFIG, SNAPSHOT_MAP } from './config.js';
 import { login, handleRedirect, hasValidToken, wasLoggedInBefore, signOut, AuthError } from './auth.js';
 import { readTables, appendRows } from './sheets.js';
-import { berechne, snapshotZeile, sparplanUebersicht, naechsteTxId } from './model.js';
-import { kursHistorie } from './history.js';
+import { berechne, snapshotZeile, sparplanUebersicht, naechsteTxId, portfolioKurve, zeitraster } from './model.js';
+import { kursHistorie, verfuegbar } from './history.js';
 import { fmtEur, fmtPct, fmtNum, sign, plus, fmtDate, todaySerial, todayIso, serialToDate, esc } from './format.js';
 
 const TABS = ['Assets', 'Kurse', 'Transaktionen', 'Sparplaene', 'Konten', 'Salden', 'Snapshots'];
@@ -161,6 +161,14 @@ function renderUebersicht() {
         ${deltaKpi('Seit Jahresbeginn', ytdRef)}
       </div>
     </div>
+    <div class="card">
+      <div class="toolbar"><h2 style="margin:0">Entwicklung</h2>
+        <div class="seg" id="seg-entw"><button data-v="24h">24h</button><button data-v="monat">Monat</button><button data-v="ytd">YTD</button></div>
+      </div>
+      <p id="entw-delta" style="margin:0 0 8px"></p>
+      <div class="chart-box"><canvas id="ch-entw"></canvas></div>
+      <p id="entw-info" class="muted small"></p>
+    </div>
     <div class="grid two">
       <div class="card"><h2>Risiko</h2>
         <div class="stack">${stack}</div>
@@ -178,6 +186,8 @@ function renderUebersicht() {
         <td>${String(p.aktiv).toUpperCase() === 'TRUE' ? '<span class="pos">aktiv</span>' : '<span class="muted">inaktiv</span>'}</td></tr>`).join('')}
       </tbody></table>
     </div>`;
+  seg('#seg-entw', entwRange, (v) => { entwRange = v; zeichneEntwicklung(); });
+  zeichneEntwicklung();
 }
 
 const nameVon = (assetId) => db.Assets.find((a) => a.asset_id === assetId)?.bezeichnung || assetId;
@@ -258,19 +268,131 @@ function seg(sel, aktiv, onChange) {
   });
 }
 
-function chartBasis() {
+const FMT_X = {
+  monatJahr: (v) => new Date(v).toLocaleDateString('de-AT', { month: 'short', year: '2-digit' }),
+  tag: (v) => new Date(v).toLocaleDateString('de-AT', { day: '2-digit', month: '2-digit' }),
+  zeit: (v) => new Date(v).toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit' }),
+  monat: (v) => new Date(v).toLocaleDateString('de-AT', { month: 'short' }),
+};
+const FMT_TIP = (v, mitZeit) => new Date(v).toLocaleString('de-AT', mitZeit
+  ? { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }
+  : { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+function chartBasis(fmtX = FMT_X.monatJahr, mitZeit = false) {
   return {
     responsive: true, maintainAspectRatio: false, animation: false,
-    interaction: { mode: 'index', intersect: false },
+    // nearest/x statt index: Datensätze dürfen unterschiedliche Zeitpunkte haben
+    interaction: { mode: 'nearest', axis: 'x', intersect: false },
     plugins: {
       legend: { labels: { color: css('--muted'), boxWidth: 10 } },
-      tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${fmtEur(c.parsed.y)}` } },
+      tooltip: { callbacks: {
+        title: (items) => (items.length ? FMT_TIP(items[0].parsed.x, mitZeit) : ''),
+        label: (c) => `${c.dataset.label}: ${fmtEur(c.parsed.y)}`,
+      } },
     },
     scales: {
-      x: { type: 'linear', ticks: { color: css('--muted'), maxTicksLimit: 6, callback: (v) => new Date(v).toLocaleDateString('de-AT', { month: 'short', year: '2-digit' }) }, grid: { color: css('--line') } },
+      x: { type: 'linear', ticks: { color: css('--muted'), maxTicksLimit: 6, callback: fmtX }, grid: { color: css('--line') } },
       y: { ticks: { color: css('--muted'), callback: (v) => fmtEur(v) }, grid: { color: css('--line') } },
     },
   };
+}
+
+/* ───────────── Entwicklung (Übersicht): 24h | Monat | YTD ───────────── */
+
+let entwRange = '24h';
+let entwLauf = 0;
+
+function entwZeitraum(range) {
+  const now = Date.now();
+  const d = new Date();
+  const ticks = [];
+  if (range === '24h') {
+    const from = now - 864e5;
+    const t = new Date(from); t.setMinutes(0, 0, 0); t.setHours(Math.ceil((t.getHours() + 1) / 4) * 4);
+    for (; t.getTime() < now; t.setHours(t.getHours() + 4)) ticks.push(t.getTime());
+    return { from, to: now, step: 15 * 60e3, fmt: FMT_X.zeit, mitZeit: true, ticks };
+  }
+  if (range === 'monat') {
+    const from = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    for (const tag of [1, 8, 15, 22, 29]) { const t = new Date(d.getFullYear(), d.getMonth(), tag).getTime(); if (t <= now) ticks.push(t); }
+    return { from, to: now, step: 36e5, fmt: FMT_X.tag, mitZeit: true, ticks };
+  }
+  const from = new Date(d.getFullYear(), 0, 1).getTime();
+  for (let m = 0; m <= d.getMonth(); m++) ticks.push(new Date(d.getFullYear(), m, 1).getTime());
+  return { from, to: now, step: 864e5, fmt: FMT_X.monat, mitZeit: false, ticks };
+}
+
+async function zeichneEntwicklung() {
+  if (!window.Chart || !db) return;
+  const lauf = ++entwLauf;
+  const info = $('#entw-info');
+  const kopf = $('#entw-delta');
+  info.textContent = 'Lade Kurse …';
+  const z = entwZeitraum(entwRange);
+  const days = Math.max(1, Math.ceil((z.to - z.from) / 864e5));
+
+  // nur Instrumente, die im Bestand vorkommen
+  const genutzt = new Set(erg.positionen.filter((p) => p.menge > 0).map((p) => p.instrument));
+  const kurse = db.Kurse.filter((k) => genutzt.has(k.instrument));
+  const serien = {};
+  const ohne = [];
+  await Promise.all(kurse.map(async (k) => {
+    if (!verfuegbar(k.hist_symbol)) { ohne.push(k.instrument); return; }
+    try {
+      const pts = (await kursHistorie(k.hist_symbol, days)).filter((p) => p.t < z.to && Number.isFinite(p.p));
+      const live = Number(k.kurs_eur);
+      // Niveau an den Sheet-Kurs angleichen (andere Börse, Future vs. Spot, Verzögerung);
+      // relative Bewegung bleibt erhalten. Kurve endet so exakt beim Live-Wert.
+      const f = pts.length && live ? live / pts[pts.length - 1].p : NaN;
+      if (!(f > 0.8 && f < 1.25)) { ohne.push(k.instrument + ' (Kursreihe passt nicht)'); return; }
+      serien[k.instrument] = [...pts.map((p) => ({ t: p.t, p: p.p * f })), { t: z.to, p: live }];
+    } catch { ohne.push(k.instrument); }
+  }));
+  if (lauf !== entwLauf) return; // inzwischen anderer Zeitraum gewählt
+
+  const kurve = portfolioKurve({
+    assets: db.Assets, transaktionen: db.Transaktionen, salden: db.Salden, konten: db.Konten,
+    kurseJetzt: Object.fromEntries(kurse.map((k) => [k.instrument, Number(k.kurs_eur)])),
+    serien, grid: zeitraster(z.from, z.to, z.step),
+  });
+
+  const start = kurve[0].v;
+  const delta = erg.summe - start;
+  const datasets = [{
+    label: entwRange === 'ytd' ? 'Heutiger Bestand zu Marktkursen' : 'Vermögen',
+    data: kurve.map((p) => ({ x: p.t, y: p.v })),
+    borderColor: css('--accent'), backgroundColor: css('--accent') + '22', fill: 'start',
+    pointRadius: 0, borderWidth: 2, cubicInterpolationMode: 'monotone',
+  }];
+
+  let kopfHtml = `<span class="${sign(delta)}"><b>${plus(fmtEur(delta), delta)}</b> ${plus(fmtPct(delta / start), delta)}</span>`;
+  if (entwRange === 'ytd') {
+    // tatsächliche Snapshots (inkl. Ein-/Auszahlungen) als zweite Linie
+    const snaps = db.Snapshots.filter((r) => typeof r.Datum === 'number' && serialToDate(r.Datum).getTime() >= z.from - 864e5 * 7)
+      .map((r) => ({ x: serialToDate(r.Datum).getTime(), y: Number(r.Summe) }));
+    snaps.push({ x: z.to, y: erg.summe });
+    if (snaps.length > 1) {
+      datasets.push({ label: 'Vermögen lt. Snapshots', data: snaps, borderColor: css('--muted'), borderDash: [5, 4], pointRadius: 3, borderWidth: 1.5, backgroundColor: css('--muted') });
+      const d2 = erg.summe - snaps[0].y;
+      kopfHtml += ` <span class="muted small">Markteffekt auf heutigen Bestand</span><br><span class="${sign(d2)}">${plus(fmtEur(d2), d2)} ${plus(fmtPct(d2 / snaps[0].y), d2)}</span> <span class="muted small">Vermögen lt. Snapshots seit ${new Date(snaps[0].x).toLocaleDateString('de-AT')} (inkl. Ein-/Auszahlungen)</span>`;
+    }
+  }
+  kopf.innerHTML = kopfHtml;
+
+  const opts = chartBasis(z.fmt, z.mitZeit);
+  opts.scales.x.min = z.from;
+  opts.scales.x.max = z.to;
+  opts.scales.x.afterBuildTicks = (axis) => { axis.ticks = z.ticks.map((value) => ({ value })); };
+  opts.scales.x.ticks.maxTicksLimit = 12;
+  opts.scales.x.ticks.autoSkip = true;
+  opts.plugins.legend.display = datasets.length > 1;
+  charts.entw?.destroy();
+  charts.entw = new Chart($('#ch-entw'), { type: 'line', data: { datasets }, options: opts });
+
+  const name = (inst) => db.Kurse.find((k) => k.instrument === inst)?.instrument || inst;
+  info.innerHTML = ohne.length
+    ? `<span class="warn">●</span> Ohne Kurshistorie, konstant zum aktuellen Kurs: ${ohne.map((i) => esc(name(i))).join(', ')}${CONFIG.KURS_PROXY_URL ? '' : ' – Kursproxy (Apps Script) noch nicht eingerichtet'}`
+    : 'Bestand × historische Kurse + Kontosalden · nichts davon im Sheet gespeichert';
 }
 
 function zeichnePortfolioChart() {

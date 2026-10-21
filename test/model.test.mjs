@@ -39,3 +39,31 @@ const b = bestaende([{tx_id:'a',datum:1,asset_id:'X',typ:'Kauf',menge:10,betrag_
 assert.equal(b.X.menge, 6); assert.ok(Math.abs(b.X.einstand - 600) < 1e-9);
 assert.equal(naechsteTxId(db.Transaktionen), 'T0014');
 console.log('OK');
+
+// ── portfolioKurve ──
+import { portfolioKurve, zeitraster } from '../js/model.js';
+{
+  const H = 3600e3, T0 = Date.UTC(2026, 9, 20, 0);   // 20.10.2026 00:00 UTC
+  const serial = (ms) => ms / 86400000 + 25569;
+  const k = portfolioKurve({
+    assets: [{ asset_id: 'B', instrument: 'BTC', risiko: 'Unsicher', aktiv: true }, { asset_id: 'E', instrument: 'ETF', risiko: 'Mäßig', aktiv: true }],
+    transaktionen: [
+      { asset_id: 'B', typ: 'Basis', datum: serial(T0 + 48 * H), menge: 2 },         // Basis gilt auch vorher
+      { asset_id: 'E', typ: 'Basis', datum: serial(T0), menge: 10 },
+      { asset_id: 'E', typ: 'Kauf', datum: serial(T0 + 24 * H), menge: 5, betrag_eur: 500 }, // erst ab 21.10.
+    ],
+    salden: [{ konto_id: 'C', datum: serial(T0), saldo_eur: 1000 }],
+    konten: [{ konto_id: 'C', risiko: 'Sicher' }],
+    kurseJetzt: { BTC: 110, ETF: 100 },
+    serien: { BTC: [{ t: T0, p: 100 }, { t: T0 + 12 * H, p: 120 }] },               // ETF ohne Serie → konstant 100
+    grid: zeitraster(T0 - H, T0 + 30 * H, 6 * H),
+  });
+  const at = (t) => k.find((p) => p.t === t).v;
+  assert.equal(at(T0 - H), 2 * 100 + 10 * 100 + 1000);        // vor erster Kursnotiz → erster Kurs
+  assert.equal(at(T0 + 11 * H), 2 * 100 + 1000 + 1000);
+  assert.equal(at(T0 + 17 * H), 2 * 120 + 1000 + 1000);       // Schrittfunktion
+  assert.equal(at(T0 + 29 * H), 2 * 120 + 15 * 100 + 1000);   // Kauf ab 21.10. wirksam
+  assert.equal(k.at(-1).t, T0 + 30 * H);                      // Endpunkt inklusive
+  const r = k.at(-1).risiko; assert.equal(r.Unsicher + r['Mäßig'] + r.Sicher, k.at(-1).v);
+  console.log('portfolioKurve OK');
+}

@@ -37,16 +37,17 @@ function doGet(e) {
     if (PROXY_KEY && p.key !== PROXY_KEY) return json_({ error: 'unauthorized' });
     const symbol = String(p.symbol || '');
     if (!/^[A-Za-z0-9.=^\-]{1,20}$/.test(symbol)) return json_({ error: 'symbol ungültig' });
-    const range = ['1mo', '3mo', '6mo', '1y', '2y', '5y', 'max'].indexOf(p.range) >= 0 ? p.range : '1y';
+    const range = ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', 'max'].indexOf(p.range) >= 0 ? p.range : '1y';
+    const interval = ['15m', '30m', '1h', '1d'].indexOf(p.interval) >= 0 ? p.interval : '1d';
 
-    const key = 'h|' + symbol + '|' + range;
+    const key = 'h|' + symbol + '|' + range + '|' + interval;
     const cache = CacheService.getScriptCache();
     const hit = cache.get(key);
     if (hit) return ContentService.createTextOutput(hit).setMimeType(ContentService.MimeType.JSON);
 
-    const points = historieEur_(symbol, range);
-    const body = JSON.stringify({ symbol: symbol, range: range, currency: 'EUR', points: points });
-    if (body.length < 95000) cache.put(key, body, 6 * 3600);
+    const points = historieEur_(symbol, range, interval);
+    const body = JSON.stringify({ symbol: symbol, range: range, interval: interval, currency: 'EUR', points: points });
+    if (body.length < 95000) cache.put(key, body, interval === '1d' ? 6 * 3600 : 15 * 60);
     return ContentService.createTextOutput(body).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     return json_({ error: String(err.message || err) });
@@ -57,9 +58,9 @@ function json_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 }
 
-function yahoo_(symbol, range) {
+function yahoo_(symbol, range, interval) {
   const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) +
-    '?range=' + range + '&interval=1d&includePrePost=false';
+    '?range=' + range + '&interval=' + (interval || '1d') + '&includePrePost=false';
   const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
   if (res.getResponseCode() !== 200) throw new Error('Yahoo ' + res.getResponseCode() + ' für ' + symbol);
   const r = JSON.parse(res.getContentText()).chart.result;
@@ -71,15 +72,16 @@ function yahoo_(symbol, range) {
   return { currency: r[0].meta.currency, price: r[0].meta.regularMarketPrice, points: out };
 }
 
-// Rechnet eine Yahoo-Historie in EUR um (GBp → GBP/100).
-function historieEur_(symbol, range) {
-  const h = yahoo_(symbol, range);
+// Rechnet eine Yahoo-Historie in EUR um (GBp → GBP/100). FX immer mit Tageskursen.
+function historieEur_(symbol, range, interval) {
+  const h = yahoo_(symbol, range, interval);
   let cur = h.currency || 'EUR';
   let faktor = 1;
   if (cur === 'GBp' || cur === 'GBX') { cur = 'GBP'; faktor = 0.01; }
   if (cur === 'EUR') return h.points.map(function (x) { return [x[0], round_(x[1] * faktor)]; });
 
-  const fx = yahoo_(cur + 'EUR=X', range).points; // 1 cur = x EUR
+  const fxRange = ['1d', '5d'].indexOf(range) >= 0 ? '1mo' : range;
+  const fx = yahoo_(cur + 'EUR=X', fxRange, '1d').points; // 1 cur = x EUR
   const byDay = {};
   fx.forEach(function (x) { byDay[day_(x[0])] = x[1]; });
   let last = fx.length ? fx[0][1] : null;

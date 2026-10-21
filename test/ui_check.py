@@ -54,10 +54,29 @@ errors = []
 with sync_playwright() as p:
     b = p.chromium.launch()
 
-    def mocks(pg):
+    import time, math
+    from urllib.parse import urlparse as _u, parse_qs as _q
+    def serie(days, base, amp):
+        now = time.time() * 1000; step = 300e3 if days <= 1 else 3600e3 if days <= 90 else 864e5
+        n = int(days * 864e5 / step)
+        return [[now - (n - i) * step, base * (1 + amp * math.sin(i / max(n, 1) * 6) + 0.1 * i / max(n, 1))] for i in range(n + 1)]
+    def cg(r):
+        q = _q(_u(r.request.url).query); days = float(q['days'][0])
+        r.fulfill(json={'prices': serie(days, 70000 if 'bitcoin' in r.request.url else 2100, 0.04)})
+    def px(r):
+        q = _q(_u(r.request.url).query); rng = q['range'][0]
+        days = {'5d': 1, '1mo': 30, '1y': 365}.get(rng, 365)
+        base = 3600 if 'GC' in r.request.url else 185 if 'WSRUSA' in r.request.url else 125
+        r.fulfill(json={'points': serie(days, base, 0.02)})
+
+    def mocks(pg, proxy=False):
         pg.on('pageerror', lambda e: errors.append(str(e)))
         pg.on('console', lambda m: m.type == 'error' and errors.append(m.text))
-        pg.route('**/js/config.js', lambda r: r.fulfill(body=(ROOT/'js/config.js').read_text().replace('HIER_CLIENT_ID', 'test'), content_type='text/javascript'))
+        cfg = (ROOT/'js/config.js').read_text()
+        if proxy: cfg = cfg.replace("KURS_PROXY_URL: ''", "KURS_PROXY_URL: 'https://proxy.test/exec'")
+        pg.route('**/js/config.js', lambda r: r.fulfill(body=cfg, content_type='text/javascript'))
+        pg.route('https://api.coingecko.com/**', cg)
+        pg.route('https://proxy.test/**', px)
         pg.route('https://sheets.googleapis.com/**', lambda r: r.fulfill(json=batch))
         if CHART: pg.route('https://cdnjs.cloudflare.com/**', lambda r: r.fulfill(path=CHART, content_type='text/javascript'))
 
@@ -101,10 +120,14 @@ with sync_playwright() as p:
     for name, vp, scheme in [('desktop', {'width': 1100, 'height': 900}, 'light'), ('mobile', {'width': 390, 'height': 844}, 'dark')]:
         c = b.new_context(viewport=vp, color_scheme=scheme, service_workers='block')
         c.add_init_script(TOKEN_INIT)
-        pg = c.new_page(); mocks(pg)
-        pg.route('https://api.coingecko.com/**', lambda r: r.fulfill(json={'prices': [[1729000000000 + i*86400000, 60000 + i*40 + (i%7)*300] for i in range(365)]}))
+        pg = c.new_page(); mocks(pg, proxy=(name == 'desktop'))
         pg.goto('http://127.0.0.1:8765/')
         pg.wait_for_selector('.hero .big')
+        for rng in ['24h', 'monat', 'ytd']:
+            pg.click(f'#seg-entw button[data-v="{rng}"]'); pg.wait_for_timeout(700)
+            print(name, rng, '|', pg.text_content('#entw-delta').strip()[:90], '|', pg.text_content('#entw-info').strip()[:80])
+            pg.locator('#ch-entw').screenshot(path=str(OUT/f'{name}-entw-{rng}.png'))
+        pg.click('#seg-entw button[data-v="24h"]'); pg.wait_for_timeout(500)
         pg.screenshot(path=str(OUT/f'{name}-uebersicht.png'), full_page=True)
         pg.goto('http://127.0.0.1:8765/#positionen'); pg.wait_for_selector('#view-positionen table')
         pg.screenshot(path=str(OUT/f'{name}-positionen.png'), full_page=True)

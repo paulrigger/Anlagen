@@ -25,7 +25,7 @@ test/                 Modell-Test (Node) und UI-Smoke-Test (Playwright)
 ### 1. GitHub Pages
 
 Repo → **Settings → Pages** → Source: *Deploy from a branch*, Branch `main`, Ordner `/ (root)` → Save.
-URL danach: `https://paulrigger.github.io/anlagen/`
+URL danach: `https://paulrigger.github.io/Anlagen/`
 
 ### 2. Google OAuth-Client (einmalig, ~10 min)
 
@@ -38,7 +38,7 @@ URL danach: `https://paulrigger.github.io/anlagen/`
      → Nur Test-User können sich überhaupt anmelden. Beim ersten Login erscheint „Google hat diese App nicht überprüft“ → *Weiter*.
 4. **Credentials → Create credentials → OAuth client ID** → Typ **Web application**:
    - *Authorized JavaScript origins*: `https://paulrigger.github.io` (ohne Pfad, ohne `/` am Ende)
-   - *Authorized redirect URIs*: `https://paulrigger.github.io/anlagen/` (**mit** `/` am Ende, exakt so)
+   - *Authorized redirect URIs*: `https://paulrigger.github.io/Anlagen/` **und** `https://paulrigger.github.io/anlagen/` (mit `/` am Ende; Groß-/Kleinschreibung zählt, beide eintragen schadet nicht)
    - Für lokalen Test zusätzlich Origin `http://localhost:8000` und Redirect `http://localhost:8000/`
 
    Der Login läuft als Redirect (kein Popup), damit er auch in der installierten App am iPhone funktioniert.
@@ -59,7 +59,7 @@ Die Client-ID ist kein Geheimnis. Ohne Origin-Freigabe und ohne Test-User-Eintra
 
 ### 4. Als App installieren
 
-Dieselbe URL `https://paulrigger.github.io/anlagen/` überall:
+Dieselbe URL `https://paulrigger.github.io/Anlagen/` überall:
 
 | Gerät | Schritte |
 |---|---|
